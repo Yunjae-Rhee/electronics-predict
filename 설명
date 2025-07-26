@@ -1,0 +1,21 @@
+	•	preprocess 1
+	  - 원본 demand_train.db → SKU·도시별 시계열 로드
+	  -	앞단 0-수요 구간 제거
+	  -	7일 rolling Z-score |Z| > 2 구간을 NaN 처리 후 선형 보간
+	  -	일별 리샘플링 → cleaned_demand.db 저장
+
+
+	•	process
+	  - cleaned_demand.db 불러오기
+	  -	STL (period = 365)로 잔차 계산 → ±2 σ, ≥7일 클러스터 → 90일 이내 병합 → event_1 ~ event_10 더미 생성
+	  -	외생 변수(CCI, 유가, 단가) 머지
+	  -	Prophet: y = Demand, regressor = [CCI, oil_price, unit_price, event_k]
+	  -	미래 730일 예측, 결과 + 이벤트 더미를 event_dummy.db & forecast_submission_template.csv 저장
+  -> codabench 67.85 
+
+
+	•	process wo exog
+	  -	위와 동일하게 STL로 이벤트 더미만 생성
+	  -	외생 변수는 제외, Prophet 회귀 변수 = event_k만 사용
+	  -	미래 730일 예측, 결과 파일 동일 형식으로 출력
+  -> codabench 60.37, 더미 변수도 없는 경우 60.39 
