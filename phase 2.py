@@ -331,7 +331,8 @@ FX_USD_PER_LOCAL = {(r.country, r.date): float(r.usd_per_local_ff) for _, r in f
 # 유가: 직전 영업일
 oil_all = all_days.merge(oil[['date','brent_usd']], on='date', how='left')
 oil_all['is_biz_day'] = (oil_all['date'].dt.weekday<5).astype(int)
-oil_all = fill_forward_by_biz(oil_all, [], 'brent_usd', 'is_biz_day')
+oil_all['_g'] = 1
+oil_all = fill_forward_by_biz(oil_all, ['_g'], 'brent_usd', 'is_biz_day').drop(columns=['_g'])
 OIL = {r.date: float(r.brent_usd_ff) for _,r in oil_all.iterrows()}
 
 # 휴일(토/일 또는 공휴일)
