@@ -5,6 +5,8 @@ import numpy as np
 from datetime import datetime, timedelta
 from collections import defaultdict
 import sqlite3
+from gurobipy import Model, GRB, quicksum
+
 # =========================================================
 # 0) 경로/기간 설정
 # =========================================================
