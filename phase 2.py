@@ -5,8 +5,6 @@ import numpy as np
 from datetime import datetime, timedelta
 from collections import defaultdict
 import sqlite3
-from gurobipy import Model, GRB, quicksum
-
 # =========================================================
 # 0) 경로/기간 설정
 # =========================================================
@@ -72,6 +70,22 @@ def truck_days_from_distance(dkm: float) -> int:
     elif d <= 2000.: return 5
     else:            return 8
 
+
+
+def to_week_idx(week_col):
+    """
+    week_col: int 주차 or 'YYYY-MM-DD' (주 시작 월요일)
+    → 모델 내부 주 인덱스(2018-01-01 기준 0..N)로 변환한 pd.Series[int]
+    """
+    if pd.api.types.is_integer_dtype(week_col):
+        return week_col.astype(int)
+    # 날짜 문자열/datetime → 주 인덱스
+    wk_dt = pd.to_datetime(week_col, errors='coerce')
+    if wk_dt.isna().any():
+        bad = week_col[wk_dt.isna()].unique()[:5]
+        raise ValueError(f"[week 파싱 실패] 예: {bad}")
+    return wk_dt.apply(week_of).astype(int)
+
 # =========================================================
 # 2) 데이터 로드
 # =========================================================
@@ -113,6 +127,7 @@ mode_meta = pd.read_csv(f'{DATA_DIR}/transport_mode_meta.csv') # mode, cost_per_
 sku_meta = pd.read_csv(f'{DATA_DIR}/sku_meta.csv')
 sku_meta['launch_date'] = pd.to_datetime(sku_meta['launch_date'])
 carbon_prod = pd.read_csv(f'{DATA_DIR}/carbon_factor_prod.csv')
+
 fac_cap = pd.read_csv(f'{DATA_DIR}/factory_capacity.csv')
 mfail   = pd.read_csv(f'{DATA_DIR}/machine_failure_log.csv')
 mfail['start_date'] = pd.to_datetime(mfail['start_date'])
@@ -201,9 +216,17 @@ D = {(r.city, r.sku, pd.to_datetime(r.date)): int(r.demand) for _, r in all_dem.
 
 # 노동/능력 파라미터
 a = dict(zip(lab_req['sku'], lab_req['labour_hours_per_unit']))
-reg_cap = {(r.factory, int(r.week)): r.reg_capacity for _,r in fac_cap.iterrows()}
-ot_cap  = {(r.factory, int(r.week)): r.ot_capacity  for _,r in fac_cap.iterrows()}
 
+fac_cap['week_idx'] = to_week_idx(fac_cap['week'])
+
+# (중복 행 방지: 동일 (factory, week_idx) 여러 행이면 합산. 정책에 따라 'max'도 가능)
+fac_cap_agg = (fac_cap
+               .groupby(['factory','week_idx'], as_index=False)
+               .agg(reg_capacity=('reg_capacity','sum'),
+                    ot_capacity=('ot_capacity','sum')))
+
+reg_cap = {(r.factory, int(r.week_idx)): float(r.reg_capacity) for _, r in fac_cap_agg.iterrows()}
+ot_cap  = {(r.factory, int(r.week_idx)): float(r.ot_capacity)  for _, r in fac_cap_agg.iterrows()}
 # 생산비/탄소
 base_cost = {(r.sku, r.factory): r.base_cost_usd for _,r in prod_cost.iterrows()}
 delta_prod = {r.factory: r.kg_CO2_per_unit for _,r in carbon_prod.iterrows()}
@@ -371,22 +394,6 @@ def cost_multiplier_depart(country, dt):
 Arr = {(k,s,t): 0 for k in K for s in SKUS for t in dates}
 Out = {(k,s,t): 0 for k in K for s in SKUS for t in dates}
 
-# IK 도착(리드타임 반영) → Arr[k,s,t_arrival]에 적재
-for (i,k) in IK:
-    for s in SKUS:
-        for t_dep in dates:
-            for m_ in modes:
-                L = L_ik[m_][(i,k)]
-                t_arr = t_dep + timedelta(days=L)
-                if t_arr <= DATE_END:
-                    Arr[(k,s,t_arr)] = Arr[(k,s,t_arr)] + X[i,k,s,t_dep,m_]
-
-# KJ 출하 → Out[k,s,t] = sum_j,m Y[k,j,s,t,m]
-for (k,j) in KJ:
-    for s in SKUS:
-        for t in dates:
-            for m_ in modes:
-                Out[(k,s,t)] = Out[(k,s,t)] + Y[k,j,s,t,m_]
 # =========================================================
 # 6) 모델 생성
 # =========================================================
@@ -425,6 +432,23 @@ Ivar = m.addVars(K, SKUS, dates, vtype=GRB.INTEGER, lb=0, name='I')
 Wvar = m.addVars(K, SKUS, dates, vtype=GRB.INTEGER, lb=0, name='W')
 Svar = m.addVars(J, SKUS, dates, vtype=GRB.INTEGER, lb=0, name='S')
 Uvar = m.addVars(J, SKUS, dates, vtype=GRB.INTEGER, lb=0, name='U')
+
+# IK 도착(리드타임 반영) → Arr[k,s,t_arrival]에 적재
+for (i,k) in IK:
+    for s in SKUS:
+        for t_dep in dates:
+            for m_ in modes:
+                L = L_ik[m_][(i,k)]
+                t_arr = t_dep + timedelta(days=L)
+                if t_arr <= DATE_END:
+                    Arr[(k,s,t_arr)] = Arr[(k,s,t_arr)] + X[i,k,s,t_dep,m_]
+
+# KJ 출하 → Out[k,s,t] = sum_j,m Y[k,j,s,t,m]
+for (k,j) in KJ:
+    for s in SKUS:
+        for t in dates:
+            for m_ in modes:
+                Out[(k,s,t)] = Out[(k,s,t)] + Y[k,j,s,t,m_]
 
 # =========================================================
 # 7) 제약식
