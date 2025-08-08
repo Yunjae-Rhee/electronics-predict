@@ -845,6 +845,7 @@ if m.status in [GRB.OPTIMAL, GRB.TIME_LIMIT]:
         for s in SKUS:
             for t in dates:
                 for m_ in modes:
+                    
                     qty = int(round(Y[k,j,s,t,m_].X))
                     if qty > 0:
                         ship_rows.append([t.strftime('%Y-%m-%d'),'warehouse',s,0,0,qty, k, j, m_])
