@@ -1,28 +1,42 @@
 # ============================================================================
-# 0) Imports & Master Constants (UNCHANGED)
+#  FULL‑Fidelity Two‑Stage Solver  **with weekly aggregation & DB output**
+#  (drop‑in replacement for your previous script)
 # ============================================================================
 from __future__ import annotations
 import math, gc, os, sqlite3, psutil
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, DefaultDict
 
 import pandas as pd, numpy as np
+from collections import defaultdict
 from gurobipy import Model, GRB, quicksum
 
 DATA_DIR   = Path("data")
 CHUNK_DAYS = 31              # ≤ 1 month per MILP instance
 DATE_START = datetime(2018, 1, 1)
 DATE_END   = datetime(2024,12,31)
+DB_NAME    = "plan_submission_template.db"  # ← 제출용 파일
+TABLE_NAME = "plan_submission_template"
 
 # ---------------------------------------------------------------------------
 # Helper to log memory
 PROC = psutil.Process(os.getpid())
 log  = lambda tag: print(f"[{tag}] RSS = {PROC.memory_info().rss/1024**2:,.1f} MB")
 
-# ============================================================================
-# 1) SECTION 1 – UTILITY FNS  (identical to your original file)
-# ============================================================================
+# ---------------------------------------------------------------------------
+# 1)  UTILITY FNS  (identical to original –‑ shortened here)
+# ---------------------------------------------------------------------------
+
+def date_range(d0: datetime, d1: datetime):
+    cur = d0
+    while cur <= d1:
+        yield cur;  cur += timedelta(days=1)
+
+def week_monday(dt: datetime) -> datetime:
+    """Return the Monday date (00:00) of the ISO week dt belongs to."""
+    return dt - timedelta(days=dt.weekday())
+
 
 def date_range(d0, d1): 
     cur = d0
@@ -410,12 +424,14 @@ def cost_multiplier_depart(country, dt):
 Arr = {(k,s,t): 0 for k in K for s in SKUS for t in dates}
 Out = {(k,s,t): 0 for k in K for s in SKUS for t in dates}
 
+DATES_ALL: List[datetime] = list(date_range(DATE_START, DATE_END))
+
+
 # ============================================================================
 # 3) MODEL WRAPPER – builds *original* MILP for an arbitrary date slice
 # ============================================================================
-
 def build_daily_model(t0: datetime, t1: datetime,
-                      inv_init: Dict[Tuple[str,str], int]) -> Tuple[Model, Dict]:
+                      inv_init: Dict[Tuple[str,str], int]):
     """Return Model + dicts capturing end‑state variables needed for the next chunk.
     *inv_init* is { (warehouse, sku): inventory_on_t0_minus_1 }.
     All code inside is copy‑paste from your Section 6–8 with three changes:
@@ -431,7 +447,7 @@ def build_daily_model(t0: datetime, t1: datetime,
     # =========================================================
     # 3-1) 모델 생성
     # =========================================================
-    m = Model('SCM_MILP')
+    m = Model(f"SCM_{t0.date()}_{t1.date()}")
     BIGM = 10**9
     QCONT = 4000
 
@@ -838,53 +854,143 @@ def build_daily_model(t0: datetime, t1: datetime,
                             for (k,j) in KJ for d in range(1,8) for b in blocks if b>min(blocks))
 
     return m, {
-        "I_end": Ivar,                # to extract post‑solve
-        "live_wh": live_wh,           # so that next chunk knows which warehouses exist
+        "I_end": Ivar,   # inventory at day t1
+        "P":     P,
+        "H_reg": H_reg,
+        "H_ot":  H_ot,
+        "X":     X,
+        "Y":     Y,
     }
-
-
-# ============================================================================
-# 4) DRIVER – solve chunks sequentially, carry inventory forward
-# ============================================================================
-
+# ---------------------------------------------------------------------------
+# 4) DRIVER  ―  월 단위 MILP →  주간(plan_submission_template) DB 작성
+# ---------------------------------------------------------------------------
 def run_chunked_pipeline():
-    inv_carry: Dict[Tuple[str,str], int] = {}
+    # ──────────────────────────────────────────────────────────────
+    # 1) Chunk 간 인벤토리 carry
+    # ──────────────────────────────────────────────────────────────
+    inv_carry: Dict[Tuple[str, str], int] = {}      # (warehouse, sku) → units
     t_curr = DATE_START
     total_obj = 0.0
 
+    # ──────────────────────────────────────────────────────────────
+    # 2) 주차 집계 버퍼
+    # ──────────────────────────────────────────────────────────────
+    WeekKey = Tuple[str, str, str]                  # (MonDate, factory, sku)
+    PLAN: DefaultDict[WeekKey, List[int]] = defaultdict(lambda: [0, 0, 0])
+    #                   ↑ [reg_prod, ot_prod, ship_qty]
+
+    SHIP_ROWS: List[Tuple[str, str, str, str, str, int, str]] = []
+    #             (MonDate, sku, from_city, to_city, mode, qty, factory)
+
     while t_curr <= DATE_END:
-        t_next = min(t_curr + timedelta(days=CHUNK_DAYS-1), DATE_END)
-        print(f"\n=== Solving {t_curr.date()} – {t_next.date()} ===")
-        log("before build")
-        m, refs = build_daily_model(t_curr, t_next, inv_carry)
+        t_next = min(t_curr + timedelta(days=CHUNK_DAYS - 1), DATE_END)
+        print(f"\n===  Solving {t_curr.date()} – {t_next.date()}  ===")
+        log("build")
+        m, ref = build_daily_model(t_curr, t_next, inv_carry)
+
         m.Params.OutputFlag = 0
         m.Params.MIPGap     = 0.03
         m.Params.TimeLimit  = 1800
-        log("before optimise")
+        log("opt start")
         m.optimize()
-        log("after optimise")
+        log("opt done")
 
         if m.Status not in [GRB.OPTIMAL, GRB.TIME_LIMIT]:
-            print("Model did not converge – abort.")
-            break
+            raise RuntimeError("MILP failed to converge")
+
         total_obj += m.ObjVal
 
-        # --- extract ending inventory to feed next chunk ---
+        # ---------- (A) 생산량 주차-집계 ----------
+        P, H_reg, H_ot = ref["P"], ref["H_reg"], ref["H_ot"]
+        for (i, s, t) in [(i, s, t) for (i, s, t) in P.keys()
+                          if t_curr <= t <= t_next]:
+            units = int(round(P[i, s, t].X))
+            if units == 0:
+                continue
+
+            # 노동시간을 이용해 정규/OT 비례 배분
+            hrs_tot  = H_reg[i, t].X + H_ot[i, t].X
+            if hrs_tot == 0:          # 이론상 불가능, 방어
+                reg_u, ot_u = units, 0
+            else:
+                reg_frac = H_reg[i, t].X / hrs_tot
+                reg_u = int(round(units * reg_frac))
+                ot_u  = units - reg_u
+
+            wk = week_monday(t).strftime("%Y-%m-%d")
+            PLAN[(wk, i, s)][0] += reg_u
+            PLAN[(wk, i, s)][1] += ot_u
+
+        # ---------- (B) 선적 주차-집계 ----------
+        X, Y = ref["X"], ref["Y"]
+        # 공장 → 창고
+        for (i, k, s, t, m_) in X.keys():
+            if not (t_curr <= t <= t_next):  # 이번 청크 날짜만
+                continue
+            qty = int(round(X[i, k, s, t, m_].X))
+            if qty == 0:
+                continue
+            wk = week_monday(t).strftime("%Y-%m-%d")
+            PLAN[(wk, i, s)][2] += qty                         # ship_qty
+            SHIP_ROWS.append((wk, s, site_city[i], site_city[k], m_, qty, i))
+
+        # 창고 → 도시
+        for (k, j, s, t, m_) in Y.keys():
+            if not (t_curr <= t <= t_next):
+                continue
+            qty = int(round(Y[k, j, s, t, m_].X))
+            if qty == 0:
+                continue
+            wk = week_monday(t).strftime("%Y-%m-%d")
+            SHIP_ROWS.append((wk, s, site_city[k], j, m_, qty, None))  # factory=N/A
+
+        # ---------- (C) 인벤토리 carry ----------
         inv_carry.clear()
+        I_end = ref["I_end"]
         for k in K:
             for s in SKUS:
-                var = refs["I_end"][k,s,t_next]
-                inv_carry[(k,s)] = int(round(var.X))
+                inv_carry[(k, s)] = int(round(I_end[k, s, t_next].X))
 
-        # optional: save chunk CSVs here …
-
-        # free memory
+        # 메모리 정리
         del m
         gc.collect()
         t_curr = t_next + timedelta(days=1)
 
-    print("\nPIPELINE FINISHED  ➜  total cost =", f"${total_obj:,.0f}")
+    print("\nPIPELINE DONE  →  total cost =", f"${total_obj:,.0f}")
 
+    # ──────────────────────────────────────────────────────────────
+    # 3)  DB 파일(plan_submission_template.db) 작성
+    # ──────────────────────────────────────────────────────────────
+    # 3-1) 생산-집계 → DF
+    df_prod = pd.DataFrame(
+        [(wk, fac, sku, vals[0], vals[1])
+         for (wk, fac, sku), vals in PLAN.items() if vals[0] or vals[1]],
+        columns=["date", "factory", "sku", "production_qty", "ot_qty"]
+    )
 
-if __name__ == "__main__":
-    run_chunked_pipeline()
+    # 3-2) 선적-집계 → DF
+    df_ship = pd.DataFrame(
+        SHIP_ROWS,
+        columns=["date", "sku", "from_city", "to_city", "mode", "ship_qty", "factory"]
+    ).groupby(["date", "factory", "sku", "from_city", "to_city", "mode"],
+              as_index=False).agg(ship_qty=("ship_qty", "sum"))
+
+    # 3-3) 두 DF 병합 (outer concat)
+    df_final = pd.concat([
+        df_prod.assign(ship_qty=0, from_city=None, to_city=None, mode=None),
+        df_ship.assign(production_qty=0, ot_qty=0)
+    ], ignore_index=True).fillna({"production_qty": 0, "ot_qty": 0, "ship_qty": 0})
+
+    df_final = df_final[[
+        "date", "factory", "sku",
+        "production_qty", "ot_qty", "ship_qty",
+        "from_city", "to_city", "mode"
+    ]]
+
+    # 3-4) SQLite 저장
+    if os.path.exists(DB_NAME):
+        os.remove(DB_NAME)
+    with sqlite3.connect(DB_NAME) as conn:
+        df_final.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
+
+    print(f"✅  결과 DB 작성 완료  →  {DB_NAME} (table: {TABLE_NAME})")
