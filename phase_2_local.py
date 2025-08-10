@@ -994,3 +994,5 @@ def run_chunked_pipeline():
         df_final.to_sql(TABLE_NAME, conn, if_exists="replace", index=False)
 
     print(f"✅  결과 DB 작성 완료  →  {DB_NAME} (table: {TABLE_NAME})")
+if __name__ == "__main__":
+    run_chunked_pipeline()
