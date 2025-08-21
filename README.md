@@ -12,6 +12,7 @@ SmartPhone Global Supply-Chain Challenge 솔루션 실행 가이드
 2.1 디렉토리 구조
 
 코드를 실행하기 전, 프로젝트 디렉토리는 다음과 같은 구조를 가져야 한다.
+
 ```
 .
 ├── data/                  # 모든 데이터 파일 (.csv, .db)이 위치하는 폴더
@@ -33,33 +34,33 @@ SmartPhone Global Supply-Chain Challenge 솔루션 실행 가이드
 
 전체 기간의 총수요와 운송비를 고려하여 최적의 공장 5곳과 창고 20곳을 선정한다.
 
-입력: data/ 폴더의 원본 데이터
+입력: ```data/``` 폴더의 원본 데이터
 
-출력 (results/ 폴더):
+출력 (```results/``` 폴더):
 
-selected_factories.csv: 선정된 공장 목록
+```selected_factories.csv```: 선정된 공장 목록
 
-selected_warehouses.csv: 선정된 창고 목록
+```selected_warehouses.csv```: 선정된 창고 목록
 
 3.2 2단계: 전술 계획 수립
 
 1단계에서 선정된 시설을 바탕으로, ABC-XYZ 분석과 생산 능력 균등화를 통해 주/예비 공급처 및 SKU별 재고 정책(SS, s, S)을 수립한다.
 
-입력: results/selected_*.csv 파일 및 data/ 폴더의 원본 데이터
+입력: ```results/selected_*.csv``` 파일 및 ```data/``` 폴더의 원본 데이터
 
-출력 (results/ 폴더):
+출력 (```results/``` 폴더):
 
-tactical_plan_advanced.json: 3단계 시뮬레이션이 사용할 소싱 및 재고 규칙
+```tactical_plan_advanced.json```: 3단계 시뮬레이션이 사용할 소싱 및 재고 규칙
 
 3.3 3단계: 운영 시뮬레이션
 
 2단계에서 수립된 전술 계획에 따라, 2018년부터 2024년까지의 일일 운영을 시뮬레이션하여 최종 제출 파일을 생성한다.
 
-입력: results/tactical_plan_advanced.json 파일 및 data/ 폴더의 원본 데이터
+입력: ```results/tactical_plan_advanced.json``` 파일 및 ```data/``` 폴더의 원본 데이터
 
-출력 (results/ 폴더):
+출력 (```results/``` 폴더):
 
-plan_submission_template.db: 최종 제출용 생산 및 물류 계획 DB 파일
+```plan_submission_template.db```: 최종 제출용 생산 및 물류 계획 DB 파일
 
 전체 기간 및 주별 Fill-Rate
 
