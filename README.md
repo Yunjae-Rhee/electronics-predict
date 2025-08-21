@@ -12,7 +12,7 @@ SmartPhone Global Supply-Chain Challenge 솔루션 실행 가이드
 2.1 디렉토리 구조
 
 코드를 실행하기 전, 프로젝트 디렉토리는 다음과 같은 구조를 가져야 한다.
-
+```
 .
 ├── data/                  # 모든 데이터 파일 (.csv, .db)이 위치하는 폴더
 │   ├── site_candidates.csv
@@ -27,7 +27,7 @@ SmartPhone Global Supply-Chain Challenge 솔루션 실행 가이드
     ├── selected_warehouses.csv
     ├── tactical_plan_advanced.json
     └── plan_submission_template.db
-
+```
 3. 실행 순서
 3.1 1단계: 최적 입지 선정
 
